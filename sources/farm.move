@@ -8,8 +8,6 @@ module farm::farm {
     use sui::event;
     use sui::package;
     use sui::random::{Random, new_generator};
-    // use sui::table;
-    // use sui::table::Table;
     use sui::vec_map;
     use sui::vec_map::VecMap;
 
@@ -23,12 +21,7 @@ module farm::farm {
     const E_REPEATED_HARVEST: u64 = 7;
 
     // ===> special_event Constants <===
-    // 1. No attribute
-    // 3. Double anti-steal rate
-    // 4. Double steal success rate
-    // 5. 100% steal failure rate
     const NO_SPECIAL_EVENT: u64 = 1;
-    // const DOUBLE_REWARD: u64 = 2;
     const DOUBLE_ANTI_STEAL: u64 = 3;
     const DOUBLE_STEAL_SUCCESS: u64 = 4;
     const STEAL_FAIL: u64 = 5;
@@ -67,7 +60,6 @@ module farm::farm {
         id: UID,
         paused: bool, // Master switch
         epoch_games: VecMap<u64, FarmGame>, // Table with keys as epochs
-        // epoch_games: Table<u64, FarmGame>, // Table with keys as epochs
     }
 
     public struct Crop has store, copy {
@@ -100,14 +92,13 @@ module farm::farm {
     // ===> Functions <===
 
     /// Initialize the farming game with an initial FARM object and context.
-    fun init(otw: FARM, ctx: &mut TxContext) {
+    public entry fun init(otw: FARM, ctx: &mut TxContext) {
         package::claim_and_keep(otw, ctx);
 
         transfer::share_object(
             Director {
                 id: object::new(ctx),
                 paused: false,
-                // epoch_games: table::new(ctx),
                 epoch_games: vec_map::empty<u64, FarmGame>(),
             }
         );
@@ -178,7 +169,7 @@ module farm::farm {
     /// Get the FarmGame by epoch.
     fun get_game_by_epoch(director: &mut Director, epoch: u64) : &mut FarmGame {
         assert!(vec_map::contains(&director.epoch_games, &epoch), E_GAME_DOES_NOT_EXIST);
-        let epoch_game = vec_map::get_mut(&mut director.epoch_games, &epoch);
+        let epoch_game = vec_map::get_mut(&director.epoch_games, &epoch);
         epoch_game
     }
 
@@ -247,182 +238,105 @@ module farm::farm {
         assert!(vec_map::contains(&farm_game.farm_users, &sender), E_NOT_INVOLVED_IN_PLANTING);
         let mut final_rewards = {
             let farmer = farm_game.farm_users.get(&sender);
-            // Check if the user has already stolen
-            assert!(farmer.steal == false, E_STOLEN);
-            farmer.crop.token_reward
+            
+            if (!
+            farmer.crop.harvestable {
+                debug::print(&string(b"Steal failed: crop is already harvestable"));
+                farmer.crop.token_reward
+            } else {
+                let mut steal_flag = false;
+                let mut final_reward = 0;
+                let gen = &mut new_generator(rnd, ctx);
+                
+                for user in vec_map::values(&farm_game.farm_users) {
+                    if (user.address != sender && user.steal == false) {
+                        let random_value = gen.generate_u64_in_range(0, 100);
+                        if (random_value > 50) {
+                            steal_flag = true;
+                            user.steal = true;
+                            user.crop.stolen = true;
+                            final_reward = user.crop.token_reward;
+                            break;
+                        }
+                    }
+                }
+                
+                // If no stealable target is found, fail the transaction
+                assert!(steal_flag == true, E_NOT_EXISTED_AVAILABLE_FARMER);
+                
+                final_reward
+            }
         };
-        let mut steal_flag = false;
-        // Randomly select an un-stolen crop from the game
-        let mut i = 0;
-        while (i < size) {
-            let (address, farm_user) = farm_game.farm_users.get_entry_by_idx_mut(i);
 
-            // Skip self
-            if (*address == sender) {
-                i = i + 1;
-                continue
-            };
-            if (farm_user.crop.stolen == false) {
-                let mut success_rate = 40; // Default success rate is 40%
-                // Calculate own special event
-                if (farm_user.special_event == DOUBLE_STEAL_SUCCESS) {
-                    success_rate = success_rate * 2;
-                };
-
-                // Calculate opponent's special event
-                if (farm_user.special_event == DOUBLE_ANTI_STEAL) {
-                    success_rate = success_rate / 2;
-                };
-                if (farm_user.special_event == STEAL_FAIL) {
-                    success_rate = 0;
-                };
-                let mut be_found = false;
-                if (success_rate == 0) {
-                    be_found = true;
-                } else {
-                    // Get a random value
-                    let mut gen = new_generator(rnd, ctx);
-                    let random_num = gen.generate_u32_in_range(1, 100);
-                    if (random_num > success_rate) {
-                        be_found = true;
-                    };
-                };
-
-                let my_rewards = final_rewards; // Own reward
-                let other_rewards = farm_user.crop.token_reward; // Opponent's reward
-
-                debug::print(&string(b"my_rewards:"));
-                debug::print(&my_rewards);
-                debug::print(&string(b"other_rewards:"));
-                debug::print(&other_rewards);
-
-                // Each divided by half, take the minimum value
-                let final_reward = if (my_rewards / 2 < other_rewards / 2) {
-                    my_rewards / 2
-                } else {
-                    other_rewards / 2
-                };
-                if (be_found) {
-                    // Found out
-                    farm_user.rewards = farm_user.rewards + final_reward;
-                    final_rewards = final_rewards - final_reward;
-                    farm_user.crop.stolen = true;
-                } else {
-                    // Not found
-                    farm_user.rewards = farm_user.rewards - final_reward;
-                    final_rewards = final_rewards + final_reward;
-                    farm_user.crop.stolen = true;
-                };
-                steal_flag = true;
-                debug::print(&EventSteal {
-                    sender,
-                    target: *address,
-                    epoch,
-                    success: !be_found,
-                    reward: final_reward,
-                });
-                // Steal event
-                event::emit(EventSteal {
-                    sender,
-                    target: *address,
-                    epoch,
-                    success: !be_found,
-                    reward: final_reward,
-                });
-                break
-            };
-            i = i + 1;
-        };
-        if (!steal_flag) {
-            assert!(steal_flag == true, E_NOT_EXISTED_AVAILABLE_FARMER);
-        };
+        farm_game.balance_pool = farm_game.balance_pool - final_rewards;
         let farmer = farm_game.farm_users.get_mut(&sender);
-        farmer.steal = true;
-        farmer.rewards = final_rewards;
+        farmer.rewards = farmer.rewards + final_rewards;
+
+        event::emit(EventSteal {
+            sender,
+            target: farmer.address,
+            epoch,
+            success: steal_flag,
+            reward: final_rewards,
+        });
+
         debug::print(&string(b"=====================steal end====================="));
     }
 
-    /// Harvest crops from the previous epoch.
+    /// Perform harvesting action with given director and context.
     public entry fun harvest(director: &mut Director, ctx: &mut TxContext) {
         debug::print(&string(b"=====================harvest start====================="));
-        // Check if the user participated in the previous epoch
-        let pre_epoch = tx_context::epoch(ctx) - 1;
+        // Check if the master switch is on
+        assert!(director.paused == false, E_PAUSED);
+        let epoch = tx_context::epoch(ctx);
         let sender = tx_context::sender(ctx);
-        let farmer = get_farmer_by_epoch(director, pre_epoch, sender);
-        // Check if the crop has already been harvested
-        assert!(farmer.crop.harvested == false, E_REPEATED_HARVEST);
 
-        let rewards = farmer.rewards;
-        // Update rewards
+        // Get the current epoch game
+        let farm_game = get_game_by_epoch(director, epoch);
+        
+        // Get the current farmer
+        let farmer = get_farmer_by_epoch(director, epoch, sender);
+        
+        // Ensure the crop is harvestable and not already harvested
+        assert!(farmer.crop.harvestable == true, E_REPEATED_HARVEST);
+        
+        let final_reward = farmer.crop.token_reward;
+        
+        // Update farmer's rewards
+        farmer.rewards = farmer.rewards + final_reward;
         farmer.crop.harvested = true;
-
-        // Get the previous epoch game
-        let farm_game = get_game_by_epoch(director, pre_epoch);
-        let balance_pool = farm_game.balance_pool;
-
-        // Harvest reward
-        let final_reward = rewards;
-        // Issue reward
-        // Split coins
-        let investments_balance = balance::split(&mut farm_game.investments, final_reward);
-        let coin_reward = coin::from_balance(investments_balance, ctx);
-        // Transfer reward
-        transfer::public_transfer(coin_reward, sender);
-
-        // Update the reward pool
-        farm_game.balance_pool = balance_pool - final_reward;
-        debug::print(&EventHarvest{
+        
+        event::emit(EventHarvest {
             sender,
-            epoch: pre_epoch,
+            epoch,
             reward: final_reward,
         });
-        // Harvest event
-        event::emit(EventHarvest{
-            sender,
-            epoch: pre_epoch,
-            reward: final_reward,
-        });
+        
         debug::print(&string(b"=====================harvest end====================="));
     }
 
-    /// Pause the game.
-    public entry fun pause(_: &AdminCap, director: &mut Director) {
+    /// Pauses the game, requires AdminCap
+    public entry fun pause(director: &mut Director, admin: AdminCap, ctx: &mut TxContext) {
+        assert!(tx_context::sender(ctx) == admin.id, E_PAUSED);
         director.paused = true;
     }
 
-    /// Resume the game.
-    public entry fun resume(_: &AdminCap, director: &mut Director) {
+    /// Resumes the game, requires AdminCap
+    public entry fun resume(director: &mut Director, admin: AdminCap, ctx: &mut TxContext) {
+        assert!(tx_context::sender(ctx) == admin.id, E_PAUSED);
         director.paused = false;
     }
 
-    #[test_only]
-    public fun get_epoch_farm_game(director: &Director, epoch: &u64): &FarmGame {
-        vec_map::get(&director.epoch_games, epoch)
+    /// Transfer the AdminCap to another address
+    public entry fun transfer_admin_cap(admin: AdminCap, new_admin: address, ctx: &mut TxContext) {
+        assert!(tx_context::sender(ctx) == admin.id, E_PAUSED);
+        transfer::transfer(admin, new_admin);
     }
 
-    #[test_only]
-    public fun get_epoch_farm_users(farm_game: &FarmGame): &VecMap<address, FarmUser> {
-        &farm_game.farm_users
+    /// Emits debug information to log
+    #[inline(never)]
+    fun emit_debug_info(director: &Director, ctx: &TxContext) {
+        debug::print(&director.paused);
+        debug::print(&tx_context::epoch(ctx));
     }
-
-    #[test_only]
-    public fun get_epoch_farm_balance(farm_game: &FarmGame): u64 {
-        farm_game.balance_pool
-    }
-
-    #[test_only]
-    public fun get_epoch_farm_user_reward(farm_user: &FarmUser): u64 {
-        farm_user.rewards
-    }
-
-    #[test_only]
-    public fun get_special_event(farm_user: &FarmUser): u64 {
-        farm_user.special_event
-    }
-
-    #[test_only]
-    public fun test_init(ctx: &mut TxContext) {
-        init(FARM{}, ctx)
-    }
-
 }
