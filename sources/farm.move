@@ -8,12 +8,10 @@ module farm::farm {
     use sui::event;
     use sui::package;
     use sui::random::{Random, new_generator};
-    // use sui::table;
-    // use sui::table::Table;
     use sui::vec_map;
     use sui::vec_map::VecMap;
 
-    // ===> ErrorCodes <===
+    // ===> Error Codes <===
     const E_INVALID_AMOUNT: u64 = 1;
     const E_PAUSED: u64 = 2;
     const E_GAME_DOES_NOT_EXIST: u64 = 3;
@@ -22,13 +20,8 @@ module farm::farm {
     const E_NOT_INVOLVED_IN_PLANTING: u64 = 6;
     const E_REPEATED_HARVEST: u64 = 7;
 
-    // ===> special_event Constants <===
-    // 1. No attribute
-    // 3. Double anti-steal rate
-    // 4. Double steal success rate
-    // 5. 100% steal failure rate
+    // ===> Special Event Constants <===
     const NO_SPECIAL_EVENT: u64 = 1;
-    // const DOUBLE_REWARD: u64 = 2;
     const DOUBLE_ANTI_STEAL: u64 = 3;
     const DOUBLE_STEAL_SUCCESS: u64 = 4;
     const STEAL_FAIL: u64 = 5;
@@ -45,19 +38,21 @@ module farm::farm {
     public struct EventHarvest has copy, drop {
         sender: address,
         epoch: u64,
-        reward: u64
+        reward: u64,
     }
 
     public struct EventPlanting has copy, drop {
         sender: address,
         epoch: u64,
         investment_value: u64,
-        balance: u64
+        balance: u64,
     }
 
     // ===> Structures <===
+    /// Main FARM object to represent the game.
     public struct FARM has drop {}
 
+    /// Admin capability for managing the game.
     public struct AdminCap has key {
         id: UID,
     }
@@ -67,9 +62,9 @@ module farm::farm {
         id: UID,
         paused: bool, // Master switch
         epoch_games: VecMap<u64, FarmGame>, // Table with keys as epochs
-        // epoch_games: Table<u64, FarmGame>, // Table with keys as epochs
     }
 
+    /// Crop details.
     public struct Crop has store, copy {
         name: String, // Name
         epoch: u64, // Planting epoch
@@ -81,6 +76,7 @@ module farm::farm {
         token_reward: u64, // Token reward after harvesting
     }
 
+    /// User details in the farm game.
     public struct FarmUser has store {
         address: address,
         steal: bool,
@@ -90,6 +86,7 @@ module farm::farm {
         crop: Crop,
     }
 
+    /// Game details for each epoch.
     public struct FarmGame has store {
         epoch: u64,
         balance_pool: u64,
@@ -107,12 +104,11 @@ module farm::farm {
             Director {
                 id: object::new(ctx),
                 paused: false,
-                // epoch_games: table::new(ctx),
                 epoch_games: vec_map::empty<u64, FarmGame>(),
             }
         );
 
-        transfer::transfer(AdminCap{
+        transfer::transfer(AdminCap {
             id: object::new(ctx)
         }, tx_context::sender(ctx));
     }
@@ -133,12 +129,11 @@ module farm::farm {
             };
             vec_map::insert(&mut director.epoch_games, epoch, epoch_game);
         };
-        let farm_game = vec_map::get_mut(&mut director.epoch_games, &epoch);
-        farm_game
+        vec_map::get_mut(&mut director.epoch_games, &epoch)
     }
 
     /// Create a crop for the given epoch, investment value, and special event.
-    fun create_crop(epoch: u64, investment_value: u64, special_event:u64) : (Crop, u64) {
+    fun create_crop(epoch: u64, investment_value: u64, special_event: u64): (Crop, u64) {
         let name = string(b"Sui");
         let mature_epoch = epoch + 1;
         let investment = 0;
@@ -160,7 +155,7 @@ module farm::farm {
     }
 
     /// Create a farmer for the given epoch, address, investment value, and special event.
-    fun create_farmer(epoch: u64, address: address, investment_value: u64, special_event: u64) : FarmUser {
+    fun create_farmer(epoch: u64, address: address, investment_value: u64, special_event: u64): FarmUser {
         let investment = investment_value;
         let (crop, token_reward) = create_crop(epoch, investment_value, special_event);
 
@@ -176,17 +171,16 @@ module farm::farm {
     }
 
     /// Get the FarmGame by epoch.
-    fun get_game_by_epoch(director: &mut Director, epoch: u64) : &mut FarmGame {
+    fun get_game_by_epoch(director: &mut Director, epoch: u64): &mut FarmGame {
         assert!(vec_map::contains(&director.epoch_games, &epoch), E_GAME_DOES_NOT_EXIST);
-        let epoch_game = vec_map::get_mut(&mut director.epoch_games, &epoch);
-        epoch_game
+        vec_map::get_mut(&mut director.epoch_games, &epoch)
     }
 
     /// Get the FarmUser by epoch and sender address.
-    fun get_farmer_by_epoch(director: &mut Director, epoch: u64, sender: address) : &mut FarmUser {
+    fun get_farmer_by_epoch(director: &mut Director, epoch: u64, sender: address): &mut FarmUser {
         let epoch_game = get_game_by_epoch(director, epoch);
         assert!(vec_map::contains(&epoch_game.farm_users, &sender), E_NOT_INVOLVED_IN_PLANTING);
-        epoch_game.farm_users.get_mut(&sender)
+        vec_map::get_mut(&mut epoch_game.farm_users, &sender)
     }
 
     /// Perform planting action with given director, investment, random generator, and context.
@@ -195,17 +189,19 @@ module farm::farm {
         director: &mut Director,
         investment: &mut Coin<SUI>,
         rnd: &Random,
-        ctx: &mut TxContext)
-    {
+        ctx: &mut TxContext
+    ) {
         debug::print(&string(b"=====================planting start====================="));
         let sender = tx_context::sender(ctx);
         let epoch = tx_context::epoch(ctx);
         let investment_value = coin::value(investment);
         let paid = coin::split(investment, investment_value, ctx);
+
         // Minimum investment is 1 SUI
         assert!(investment_value >= 1_000, E_INVALID_AMOUNT);
         // Check if the master switch is on
         assert!(director.paused == false, E_PAUSED);
+
         // Get or create the current epoch game
         let gen = &mut new_generator(rnd, ctx);
         let special_event = gen.generate_u64_in_range(NO_SPECIAL_EVENT, STEAL_FAIL);
@@ -213,17 +209,18 @@ module farm::farm {
         let farm_game = get_or_create_epoch_game(director, ctx);
         farm_game.investments.join(coin::into_balance(paid));
         farm_game.balance_pool = farm_game.balance_pool + investment_value;
+
         let farm_users = &mut farm_game.farm_users;
         // Check if the user already exists
         assert!(vec_map::contains(farm_users, &sender) == false, E_REPEATED_HARVEST);
 
         vec_map::insert(farm_users, sender, farm_user);
         debug::print(&vec_map::size(&director.epoch_games));
-        event::emit(EventPlanting{
+        event::emit(EventPlanting {
             epoch,
             sender,
             investment_value,
-            balance: investment_value
+            balance: investment_value,
         });
         debug::print(&sender);
         debug::print(director);
@@ -260,7 +257,7 @@ module farm::farm {
             // Skip self
             if (*address == sender) {
                 i = i + 1;
-                continue
+                continue;
             };
             if (farm_user.crop.stolen == false) {
                 let mut success_rate = 40; // Default success rate is 40%
@@ -329,7 +326,7 @@ module farm::farm {
                     success: !be_found,
                     reward: final_reward,
                 });
-                break
+                break;
             };
             i = i + 1;
         };
@@ -371,13 +368,13 @@ module farm::farm {
 
         // Update the reward pool
         farm_game.balance_pool = balance_pool - final_reward;
-        debug::print(&EventHarvest{
+        debug::print(&EventHarvest {
             sender,
             epoch: pre_epoch,
             reward: final_reward,
         });
         // Harvest event
-        event::emit(EventHarvest{
+        event::emit(EventHarvest {
             sender,
             epoch: pre_epoch,
             reward: final_reward,
@@ -394,6 +391,8 @@ module farm::farm {
     public entry fun resume(_: &AdminCap, director: &mut Director) {
         director.paused = false;
     }
+
+    // ===> Test-only Functions <===
 
     #[test_only]
     public fun get_epoch_farm_game(director: &Director, epoch: &u64): &FarmGame {
@@ -422,7 +421,6 @@ module farm::farm {
 
     #[test_only]
     public fun test_init(ctx: &mut TxContext) {
-        init(FARM{}, ctx)
+        init(FARM {}, ctx)
     }
-
 }
